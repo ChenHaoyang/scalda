@@ -46,6 +46,7 @@ object DistributedOnlineLdaExample extends App {
   )
 
   val model = lda.inference(new TextFileRddIterator(corpusLoc, mbSize))
+  lda.saveModel(model, new File("distributedModel"))
 
   println("<-------------TOPICS LEARNED--------------->")
   lda.printTopics(model)

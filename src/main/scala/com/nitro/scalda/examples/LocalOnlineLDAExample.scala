@@ -4,6 +4,7 @@ import java.io.File
 
 import com.nitro.scalda.models.OnlineLdaParams
 import com.nitro.scalda.models.onlineLDA.local.LocalOnlineLda
+import org.apache.spark.{ SparkConf, SparkContext }
 
 object LocalOnlineLdaExample extends App {
 
@@ -42,6 +43,7 @@ object LocalOnlineLdaExample extends App {
   )
 
   val model = lda.inference(new TextFileIterator(corpusDirectory, mbSize))
+  lda.saveModel(model, new File("localModel"))
 
   println("<-------------TOPICS LEARNED--------------->")
   lda.printTopics(model)

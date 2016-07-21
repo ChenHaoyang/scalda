@@ -1,5 +1,6 @@
 package com.nitro.scalda.models.onlineLDA.distributed
 
+import java.io._
 import breeze.linalg.DenseMatrix
 import breeze.linalg.sum
 import breeze.numerics._
@@ -13,6 +14,8 @@ import org.apache.spark.SparkContext
 import org.apache.spark.mllib.linalg.{ DenseVector, Vectors }
 import org.apache.spark.mllib.linalg.distributed.{ IndexedRow, IndexedRowMatrix }
 import org.apache.spark.rdd.RDD
+
+import scala.util.Try
 
 class DistributedOnlineLda(params: OnlineLdaParams) extends OnlineLda with Serializable {
 
@@ -144,6 +147,10 @@ class DistributedOnlineLda(params: OnlineLdaParams) extends OnlineLda with Seria
     while (iter < params.maxIter && !convergence) {
 
       val lastGammaD = gammaDoc.t
+      val test = DenseMatrix((1,2,3),(4,5,6));
+      test.map(
+          b => println(b)
+          )
       val gammaPreComp = expELogThetaDoc :* (wordCts / phiNorm.t) * expELogBetaDoc.t
       gammaDoc = gammaPreComp + params.alpha
       expELogThetaDoc = exp(Utils.dirichletExpectation(gammaDoc))
@@ -179,6 +186,7 @@ class DistributedOnlineLda(params: OnlineLdaParams) extends OnlineLda with Seria
     mSStats: MinibatchSStats
   ): LdaModel = {
 
+    //mini batch size
     val mbSize = mSStats._2
     val topicUpdates = mSStats._1
 
@@ -226,7 +234,7 @@ class DistributedOnlineLda(params: OnlineLdaParams) extends OnlineLda with Seria
     val rho = math.pow(params.decay + numUpdates, -params.learningRate)
 
     val updatedLambda1 = lambdaRow.map(_ * (1 - rho))
-    val updatedLambda2 = updateRow.map(_ * (params.totalDocs.toDouble / mbSize) * rho + params.eta)
+    val updatedLambda2 = updateRow.map(_ * ((params.totalDocs.toDouble / mbSize) + params.eta) * rho)
 
     Utils.arraySum(updatedLambda1, updatedLambda2)
   }
@@ -352,5 +360,40 @@ class DistributedOnlineLda(params: OnlineLdaParams) extends OnlineLda with Seria
       numUpdates = model.numUpdates
     )
   }
+  
+   /**
+   * Save a learned topic model. Uses Java object serialization.
+   */
+  def saveModel(model: LdaModel, saveLocation: File): Try[Unit] =
+    Try {
+      val oos = new ObjectOutputStream(new FileOutputStream(saveLocation))
+      oos.writeObject(model)
+      oos.close()
+    }
+
+  /**
+   * Load a saved topic model from save location.
+   * Uses Java object deserialization.
+   */
+  def loadModel(saveLocation: File): Try[LdaModel] = {
+    val fis = new FileInputStream(saveLocation)
+    val res = loadModel(fis)
+    fis.close()
+    res
+  }
+
+  /**
+   * Load a saved topic model from an input stream.
+   *
+   * @param modelIS input stream for model.
+   * @return loaded model.
+   */
+  def loadModel(modelIS: InputStream): Try[LdaModel] =
+    Try {
+      new ObjectInputStream(modelIS)
+        .readObject()
+        .asInstanceOf[LdaModel]
+    }
+
 
 }
