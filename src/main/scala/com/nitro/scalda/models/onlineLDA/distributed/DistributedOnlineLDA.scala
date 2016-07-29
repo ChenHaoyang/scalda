@@ -1,8 +1,7 @@
 package com.nitro.scalda.models.onlineLDA.distributed
 
 import java.io._
-import breeze.linalg.{DenseMatrix => BDM}
-import breeze.linalg.sum
+import breeze.linalg.{DenseMatrix => BDM, all, normalize, sum}
 import breeze.numerics._
 import breeze.stats.distributions.Gamma
 import breeze.stats.mean
@@ -20,7 +19,7 @@ import scala.util.Try
 class DistributedOnlineLda(params: OnlineLdaParams) extends OnlineLda with Serializable {
 
   override type BowMinibatch = RDD[Document]
-  override type MinibatchSStats = (RDD[(Int, Array[Double])], Int)
+  override type MinibatchSStats = (RDD[(Int, Array[Double])], BDM[Double], Int)
   override type LdaModel = ModelSStats[IndexedRowMatrix]
   override type Lambda = IndexedRowMatrix
   override type Minibatch = RDD[String]
@@ -90,22 +89,23 @@ class DistributedOnlineLda(params: OnlineLdaParams) extends OnlineLda with Seria
         )
       })
 
+    val gammaMT = BDM.vertcat(eStepResult.map(x => x.topicProportions ).collect(): _*)
     //collect RDDs and and compute perplexity in driver.  At some point this should be "sparkified" for speed.
-    if (params.perplexity) {
-
-      val usedDocs = wordIdCountRow
-        .map(_._1.toInt)
-        .collect()
-        .toSet
-
-      val localMb = mb.zipWithIndex()
-        .filter { case (doc, id) => usedDocs.contains(id.toInt) }
-        .map(_._1)
-        .collect()
-
-      val localLambda = Utils.rdd2DM(lambda.rows)
+//    if (params.perplexity) {
+//
+//      val usedDocs = wordIdCountRow
+//        .map(_._1.toInt)
+//        .collect()
+//        .toSet
+//
+//      val localMb = mb.zipWithIndex()
+//        .filter { case (doc, id) => usedDocs.contains(id.toInt) }
+//        .map(_._1)
+//        .collect()
+//
+//      val localLambda = Utils.rdd2DM(lambda.rows)
       //    D * T
-      val gammaMT = BDM.vertcat(eStepResult.map (x => x.topicProportions ).collect().map(gamma => new BDM(1, params.numTopics, gamma)): _*)
+      
 //      val gammaRDD = eStepResult
 //        .zipWithIndex()
 //        .map { case (x, idx) => IndexedRow(idx, new DenseVector(x.topicProportions)) }
@@ -118,13 +118,13 @@ class DistributedOnlineLda(params: OnlineLdaParams) extends OnlineLda with Seria
 //      val wordScale = (score * localMb.size) / (params.totalDocs * mbWordCt.toDouble)
 //
 //      println(s"per-word perplexity: ${exp(-wordScale)}")
-    }
+//    }
 
     val topicUpdates = eStepResult
       .flatMap(updates => updates.topicUpdates)
       .reduceByKey(Utils.arraySum)
 
-    (topicUpdates, mbSize)
+    (topicUpdates, gammaMT, mbSize)
   }
 
   /**
@@ -138,7 +138,7 @@ class DistributedOnlineLda(params: OnlineLdaParams) extends OnlineLda with Seria
     doc: Document,
     gamma: BDM[Double],
     currentTopics: Array[Array[Double]]
-  ): MbSStats[Array[(Int, Array[Double])], Array[Double]] = {
+  ): MbSStats[Array[(Int, Array[Double])], BDM[Double]] = {
 
     val wordIds = doc.wordIds
     val wordCts = BDM(doc.wordCts.map(_.toDouble))
@@ -188,7 +188,7 @@ class DistributedOnlineLda(params: OnlineLdaParams) extends OnlineLda with Seria
       .zip(wordIds)
       .map(x => (x._2, x._1))
     
-    MbSStats(lambdaUpdate, gammaDoc.toArray)
+    MbSStats(lambdaUpdate, gammaDoc)
   }
 
   /**
@@ -204,9 +204,12 @@ class DistributedOnlineLda(params: OnlineLdaParams) extends OnlineLda with Seria
   ): LdaModel = {
 
     //mini batch size
-    val mbSize = mSStats._2
+    val mbSize = mSStats._3
+    val gammaMT = mSStats._2
     val topicUpdates = mSStats._1
 
+    val rho = math.pow(params.decay + model.numUpdates, -params.learningRate)
+    
     val newLambdaRows = model
       .lambda
       .rows
@@ -228,6 +231,7 @@ class DistributedOnlineLda(params: OnlineLdaParams) extends OnlineLda with Seria
       }
 
     val newTopics = new IndexedRowMatrix(newLambdaRows)
+    if(params.optimizeDocConcentration) updateAlpha(gammaMT, rho)
 
     model.copy(lambda = newTopics)
   }
@@ -237,19 +241,18 @@ class DistributedOnlineLda(params: OnlineLdaParams) extends OnlineLda with Seria
    *
    * @param lambdaRow row from overall topic matrix
    * @param updateRow row from minibatch topic matrix
-   * @param numUpdates total number of updates
+   * @param rho current learning rate
    * @param mbSize number of documents in the minibatch
    * @return merged row.
    */
   def oneDocMStep(
     lambdaRow: MatrixRow,
     updateRow: MatrixRow,
-    numUpdates: Int,
+    rho: Int,
     mbSize: Double
   ): MatrixRow = {
 
-    val rho = math.pow(params.decay + numUpdates, -params.learningRate)
-
+    //val rho = math.pow(params.decay + numUpdates, -params.learningRate)
     val updatedLambda1 = lambdaRow.map(_ * (1 - rho))
     val updatedLambda2 = updateRow.map(_ * (params.totalDocs.toDouble / mbSize) * rho + params.eta)
 
@@ -350,7 +353,6 @@ class DistributedOnlineLda(params: OnlineLdaParams) extends OnlineLda with Seria
     for (topic <- topN.zipWithIndex) {
       println("Topic #" + topic._2 + ": " + topic._1)
     }
-
   }
 
   /**
@@ -418,23 +420,21 @@ class DistributedOnlineLda(params: OnlineLdaParams) extends OnlineLda with Seria
    * @see Section 3.3, Huang: Maximum Likelihood Estimation of Dirichlet Distribution Parameters
    *      (http://jonathan-huang.org/research/dirichlet/dirichlet.pdf)
    */
-//  private def updateAlpha(gammat: BDM[Double]): Unit = {
-//    val weight = rho()
-//    val N = gammat.rows.toDouble
-//    val alpha = this.alpha.toBreeze.toDenseVector
-//    val logphat: BDM[Double] = sum(LDAUtils.dirichletExpectation(gammat)(::, breeze.linalg.*)) / N
-//    val gradf = N * (-LDAUtils.dirichletExpectation(alpha) + logphat.toDenseVector)
-//
-//    val c = N * trigamma(sum(alpha))
-//    val q = -N * trigamma(alpha)
-//    val b = sum(gradf / q) / (1D / c + sum(1D / q))
-//
-//    val dalpha = -(gradf - b) / q
-//
-//    if (all((weight * dalpha + alpha) :> 0D)) {
-//      alpha :+= weight * dalpha
-//      this.alpha = Vectors.dense(alpha.toArray)
-//    }
-//  }
+  private def updateAlpha(gammat: BDM[Double], rho: Double): Unit = {
+    val weight = rho
+    val N = gammat.rows.toDouble
+    val logphat: BDM[Double] = sum(Utils.dirichletExpectation(gammat)(::, breeze.linalg.*)) / N
+    val gradf = N * (-Utils.dirichletExpectation(this.alpha) + logphat)
+
+    val c = N * trigamma(sum(alpha))
+    val q = -N * trigamma(alpha)
+    val b = sum(gradf / q) / (1D / c + sum(1D / q))
+
+    val dalpha = -(gradf - b) / q
+
+    if (all((weight * dalpha + this.alpha) :> 0D)) {
+      alpha :+= weight * dalpha
+    }
+  }
 
 }

@@ -13,5 +13,6 @@ case class OnlineLdaParams(
   numTopics: Int,
   totalDocs: Int,
   lemmatize: Boolean = false,
-  perplexity: Boolean = false
+  perplexity: Boolean = false,
+  optimizeDocConcentration: Boolean = true
 )
