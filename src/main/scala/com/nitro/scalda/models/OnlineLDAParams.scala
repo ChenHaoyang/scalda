@@ -1,8 +1,10 @@
 package com.nitro.scalda.models
 
+import org.apache.spark.mllib.linalg.{Vector, Vectors}
+
 case class OnlineLdaParams(
   vocabulary: IndexedSeq[String],
-  alpha: Double,
+  alpha: Vector = Vectors.dense(0),
   eta: Double,
   decay: Double,
   learningRate: Double,

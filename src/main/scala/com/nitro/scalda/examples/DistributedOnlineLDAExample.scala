@@ -5,6 +5,8 @@ import java.io.File
 import com.nitro.scalda.models.OnlineLdaParams
 import com.nitro.scalda.models.onlineLDA.distributed.DistributedOnlineLda
 import org.apache.spark.{ SparkConf, SparkContext }
+import breeze.stats.distributions.Gamma
+import org.apache.spark.mllib.linalg.{Vector, Vectors}
 
 object DistributedOnlineLdaExample extends App {
 
@@ -24,17 +26,20 @@ object DistributedOnlineLdaExample extends App {
        |----------------------------
      """.stripMargin
   )
-
+  
+  val test = Gamma(100.0, 1.0 / 100.0).sample(10).toArray
+  test.foreach { println }
+  
   implicit val sc = new SparkContext(
     new SparkConf()
       .setAppName("Distributed Online LDA Example")
       .setMaster("local[3]")
   )
-
+  
   val lda = new DistributedOnlineLda(
     OnlineLdaParams(
       vocabulary = lines(vocabFile).toIndexedSeq,
-      alpha = 1.0 / numTopics,
+      alpha = Vectors.dense(Array.fill(numTopics)(1.0 / numTopics)),
       eta = 1.0 / numTopics,
       decay = 1024,
       learningRate = 0.7,

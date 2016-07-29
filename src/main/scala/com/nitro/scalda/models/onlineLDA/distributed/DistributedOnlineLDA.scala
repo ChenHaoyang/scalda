@@ -1,7 +1,7 @@
 package com.nitro.scalda.models.onlineLDA.distributed
 
 import java.io._
-import breeze.linalg.DenseMatrix
+import breeze.linalg.{DenseMatrix => BDM}
 import breeze.linalg.sum
 import breeze.numerics._
 import breeze.stats.distributions.Gamma
@@ -11,7 +11,7 @@ import com.nitro.scalda.models._
 import com.nitro.scalda.tokenizer.StanfordLemmatizer
 import com.nitro.scalda.evaluation.perplexity.Perplexity._
 import org.apache.spark.SparkContext
-import org.apache.spark.mllib.linalg.{ DenseVector, Vectors }
+import org.apache.spark.mllib.linalg.{ DenseVector, Vector, Vectors }
 import org.apache.spark.mllib.linalg.distributed.{ IndexedRow, IndexedRowMatrix }
 import org.apache.spark.rdd.RDD
 
@@ -26,7 +26,24 @@ class DistributedOnlineLda(params: OnlineLdaParams) extends OnlineLda with Seria
   override type Minibatch = RDD[String]
 
   type MatrixRow = Array[Double]
-
+  
+  /** alias for docConcentration */
+  private var alpha: BDM[Double] = if (params.alpha.size == 1) {
+      if (params.alpha(0) == -1) new BDM(params.numTopics, 1, Array.fill(params.numTopics)(1.0 / params.numTopics))
+      else {
+        require(params.alpha(0) >= 0,
+          s"all entries in alpha must be >=0, got: $alpha")
+        new BDM(params.numTopics, 1, Array.fill(params.numTopics)(params.alpha(0)))
+      }
+    } else {
+      require(params.alpha.size == params.numTopics,
+        s"alpha must have length k, got: $alpha")
+      params.alpha.toArray.foreach { case (x) =>
+        require(x >= 0, s"all entries in alpha must be >= 0, got: $alpha")
+      }
+      new BDM(params.numTopics, 1, params.alpha.toArray)
+    }
+  
   /**
    * Perform E-Step on minibatch.
    *
@@ -87,19 +104,20 @@ class DistributedOnlineLda(params: OnlineLdaParams) extends OnlineLda with Seria
         .collect()
 
       val localLambda = Utils.rdd2DM(lambda.rows)
-
-      val gammaRDD = eStepResult
-        .zipWithIndex()
-        .map { case (x, idx) => IndexedRow(idx, new DenseVector(x.topicProportions)) }
-
-      val localGamma = Utils.rdd2DM(gammaRDD)
-
-      val score = perplexity(localMb, localGamma, localLambda.t, params)
-
-      val mbWordCt = sum(localMb.flatMap(_.wordCts))
-      val wordScale = (score * localMb.size) / (params.totalDocs * mbWordCt.toDouble)
-
-      println(s"per-word perplexity: ${exp(-wordScale)}")
+      //    D * T
+      val gammaMT = BDM.vertcat(eStepResult.map (x => x.topicProportions ).collect().map(gamma => new BDM(1, params.numTopics, gamma)): _*)
+//      val gammaRDD = eStepResult
+//        .zipWithIndex()
+//        .map { case (x, idx) => IndexedRow(idx, new DenseVector(x.topicProportions)) }
+//
+//      val localGamma = Utils.rdd2DM(gammaRDD)
+//
+//      val score = perplexity(localMb, localGamma, localLambda.t, params)
+//
+//      val mbWordCt = sum(localMb.flatMap(_.wordCts))
+//      val wordScale = (score * localMb.size) / (params.totalDocs * mbWordCt.toDouble)
+//
+//      println(s"per-word perplexity: ${exp(-wordScale)}")
     }
 
     val topicUpdates = eStepResult
@@ -118,17 +136,17 @@ class DistributedOnlineLda(params: OnlineLdaParams) extends OnlineLda with Seria
    */
   def oneDocEStep(
     doc: Document,
-    gamma: DenseMatrix[Double],
+    gamma: BDM[Double],
     currentTopics: Array[Array[Double]]
   ): MbSStats[Array[(Int, Array[Double])], Array[Double]] = {
 
     val wordIds = doc.wordIds
-    val wordCts = DenseMatrix(doc.wordCts.map(_.toDouble))
+    val wordCts = BDM(doc.wordCts.map(_.toDouble))
 
     var gammaDoc = gamma
 
-    var expELogThetaDoc = exp(Utils.dirichletExpectation(gammaDoc))
-    val currentTopicsMatrix = new DenseMatrix(
+    var expELogThetaDoc = exp(Utils.dirichletExpectation(gammaDoc))   //T * 1
+    val currentTopicsMatrix = new BDM( //V * T
       currentTopics.size,
       params.numTopics,
       currentTopics.flatten,
@@ -136,9 +154,9 @@ class DistributedOnlineLda(params: OnlineLdaParams) extends OnlineLda with Seria
       params.numTopics,
       true
     )
-    val expELogBetaDoc = exp(Utils.dirichletExpectation(currentTopicsMatrix.t))
+    val expELogBetaDoc = exp(Utils.dirichletExpectation(currentTopicsMatrix))   //V * T
 
-    var phiNorm = expELogThetaDoc * expELogBetaDoc + 1e-100
+    var phiNorm =  expELogBetaDoc * expELogThetaDoc + 1e-100   //V * 1
 
     var convergence = false
     var iter = 0
@@ -147,12 +165,10 @@ class DistributedOnlineLda(params: OnlineLdaParams) extends OnlineLda with Seria
     while (iter < params.maxIter && !convergence) {
 
       val lastGammaD = gammaDoc.t
-      val test = DenseMatrix((1,2,3),(4,5,6));
-      test.map(
-          b => println(b)
-          )
-      val gammaPreComp = expELogThetaDoc :* (wordCts / phiNorm.t) * expELogBetaDoc.t
-      gammaDoc = gammaPreComp + params.alpha
+
+      //                       T * 1               T * V                V * 1                       
+      val gammaPreComp = expELogThetaDoc :* (expELogBetaDoc.t * (wordCts / phiNorm))
+      gammaDoc = gammaPreComp :+ this.alpha
       expELogThetaDoc = exp(Utils.dirichletExpectation(gammaDoc))
       phiNorm = expELogThetaDoc * expELogBetaDoc + 1e-100
 
@@ -160,17 +176,18 @@ class DistributedOnlineLda(params: OnlineLdaParams) extends OnlineLda with Seria
 
       iter += 1
     }
-
-    val lambdaUpdatePreCompute: DenseMatrix[Double] = expELogThetaDoc.t * (wordCts / phiNorm)
+    //                                              
+    val lambdaUpdatePreCompute: BDM[Double] = expELogThetaDoc.t * (wordCts / phiNorm)
 
     //Compute lambda row updates and zip with rowIds (note: rowIds = wordIds)
+    //                          V * T                  V * T    
     val lambdaUpdate = (lambdaUpdatePreCompute :* expELogBetaDoc)
       .toArray
       .grouped(lambdaUpdatePreCompute.rows)
       .toArray
       .zip(wordIds)
       .map(x => (x._2, x._1))
-
+    
     MbSStats(lambdaUpdate, gammaDoc.toArray)
   }
 
@@ -234,7 +251,7 @@ class DistributedOnlineLda(params: OnlineLdaParams) extends OnlineLda with Seria
     val rho = math.pow(params.decay + numUpdates, -params.learningRate)
 
     val updatedLambda1 = lambdaRow.map(_ * (1 - rho))
-    val updatedLambda2 = updateRow.map(_ * ((params.totalDocs.toDouble / mbSize) + params.eta) * rho)
+    val updatedLambda2 = updateRow.map(_ * (params.totalDocs.toDouble / mbSize) * rho + params.eta)
 
     Utils.arraySum(updatedLambda1, updatedLambda2)
   }
@@ -254,7 +271,7 @@ class DistributedOnlineLda(params: OnlineLdaParams) extends OnlineLda with Seria
       .zipWithIndex
       .toMap
 
-    val lambdaDriver = new DenseMatrix[Double](
+    val lambdaDriver = new BDM[Double](
       vocabMapping.size,
       params.numTopics,
       Gamma(100.0, 1.0 / 100.0).sample(vocabMapping.size * params.numTopics).toArray
@@ -285,9 +302,9 @@ class DistributedOnlineLda(params: OnlineLdaParams) extends OnlineLda with Seria
       val rawMinibatch = minibatchIterator.next()
       val bowMinibatch = rawMinibatch.map(doc => Utils.toBagOfWords(doc, vocabMapping, lemmatizer))
 
-      val gamma = new DenseMatrix[Double](
-        1,
+      val gamma = new BDM[Double](
         params.numTopics,
+        1,
         Gamma(100.0, 1.0 / 100.0).sample(params.numTopics).toArray
       )
 
@@ -342,7 +359,7 @@ class DistributedOnlineLda(params: OnlineLdaParams) extends OnlineLda with Seria
    * @param model
    * @return
    */
-  def convertToLocal(model: LdaModel): ModelSStats[DenseMatrix[Double]] = {
+  def convertToLocal(model: LdaModel): ModelSStats[BDM[Double]] = {
 
     val localMatrixRows = model
       .lambda
@@ -355,7 +372,7 @@ class DistributedOnlineLda(params: OnlineLdaParams) extends OnlineLda with Seria
     val cols = model.lambda.numCols().toInt
 
     ModelSStats(
-      lambda = new DenseMatrix(rows, cols, localMatrixRows, 0, cols, true),
+      lambda = new BDM(rows, cols, localMatrixRows, 0, cols, true),
       vocabMapping = model.vocabMapping,
       numUpdates = model.numUpdates
     )
@@ -395,5 +412,29 @@ class DistributedOnlineLda(params: OnlineLdaParams) extends OnlineLda with Seria
         .asInstanceOf[LdaModel]
     }
 
+    /**
+   * Update alpha based on `gammat`, the inferred topic distributions for documents in the
+   * current mini-batch. Uses Newton-Rhapson method.
+   * @see Section 3.3, Huang: Maximum Likelihood Estimation of Dirichlet Distribution Parameters
+   *      (http://jonathan-huang.org/research/dirichlet/dirichlet.pdf)
+   */
+//  private def updateAlpha(gammat: BDM[Double]): Unit = {
+//    val weight = rho()
+//    val N = gammat.rows.toDouble
+//    val alpha = this.alpha.toBreeze.toDenseVector
+//    val logphat: BDM[Double] = sum(LDAUtils.dirichletExpectation(gammat)(::, breeze.linalg.*)) / N
+//    val gradf = N * (-LDAUtils.dirichletExpectation(alpha) + logphat.toDenseVector)
+//
+//    val c = N * trigamma(sum(alpha))
+//    val q = -N * trigamma(alpha)
+//    val b = sum(gradf / q) / (1D / c + sum(1D / q))
+//
+//    val dalpha = -(gradf - b) / q
+//
+//    if (all((weight * dalpha + alpha) :> 0D)) {
+//      alpha :+= weight * dalpha
+//      this.alpha = Vectors.dense(alpha.toArray)
+//    }
+//  }
 
 }
