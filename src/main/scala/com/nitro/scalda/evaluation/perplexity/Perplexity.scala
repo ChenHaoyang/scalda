@@ -22,7 +22,8 @@ object Perplexity {
     mb: Seq[Document],
     mbGamma: DenseMatrix[Double],
     lambda: DenseMatrix[Double],
-    params: OnlineLdaParams
+    params: OnlineLdaParams,
+    alpha: DenseMatrix[Double]
   ): Double = {
 
     val eLogTheta = Utils.dirichletExpectation(mbGamma)
@@ -43,7 +44,7 @@ object Perplexity {
 
     }
 
-    perplexityScore += sum(mbGamma.map(el => params.alpha - el) :* eLogTheta)
+    perplexityScore += sum(mbGamma.map(el => alpha - el) :* eLogTheta)
     perplexityScore += sum(lgamma(mbGamma) - lgamma(params.alpha))
     perplexityScore += sum(lgamma(params.alpha * params.numTopics) - lgamma(sum(mbGamma, Axis._1)))
     perplexityScore *= params.totalDocs / mb.size.toDouble

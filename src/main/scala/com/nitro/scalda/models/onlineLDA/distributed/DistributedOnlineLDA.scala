@@ -88,7 +88,7 @@ class DistributedOnlineLda(params: OnlineLdaParams) extends OnlineLda with Seria
           wIdCtRow.map(_._3.toArray)
         )
       })
-
+    //    D * T
     val gammaMT = BDM.vertcat(eStepResult.map(x => x.topicProportions ).collect(): _*)
     //collect RDDs and and compute perplexity in driver.  At some point this should be "sparkified" for speed.
 //    if (params.perplexity) {
@@ -274,6 +274,7 @@ class DistributedOnlineLda(params: OnlineLdaParams) extends OnlineLda with Seria
       .zipWithIndex
       .toMap
 
+    //must rewrite with HBase support for long-tail topics
     val lambdaDriver = new BDM[Double](
       vocabMapping.size,
       params.numTopics,
@@ -316,7 +317,6 @@ class DistributedOnlineLda(params: OnlineLdaParams) extends OnlineLda with Seria
       curModel = mStep(curModel.copy(numUpdates = mbProcessed), mbSStats)
 
     }
-
     curModel
   }
 

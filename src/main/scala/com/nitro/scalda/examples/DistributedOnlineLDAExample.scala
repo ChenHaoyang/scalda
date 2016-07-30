@@ -39,7 +39,7 @@ object DistributedOnlineLdaExample extends App {
   val lda = new DistributedOnlineLda(
     OnlineLdaParams(
       vocabulary = lines(vocabFile).toIndexedSeq,
-      alpha = Vectors.dense(Array.fill(numTopics)(1.0 / numTopics)),
+      alpha = Vectors.dense(-1),
       eta = 1.0 / numTopics,
       decay = 1024,
       learningRate = 0.7,
