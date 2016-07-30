@@ -58,7 +58,9 @@ class DistributedOnlineLda(params: OnlineLdaParams) extends OnlineLda with Seria
   ): MinibatchSStats = {
 
     val mbSize = mb.count().toInt
-
+    //get the distinct word size of the current mini-batch
+    val wordTotal = mb.flatMap(docBOW => docBOW.wordIds).distinct().collect();
+    
     val wordIdDocIdCount = mb
       .zipWithIndex()
       .flatMap {
@@ -69,7 +71,8 @@ class DistributedOnlineLda(params: OnlineLdaParams) extends OnlineLda with Seria
 
     //Join with lambda to get RDD of (wordId, ((wordCount, docId), lambda(wordId),::)) tuples
     val wordIdDocIdCountRow = wordIdDocIdCount
-      .join(lambda.rows.map(row => (row.index.toInt, row.vector.toArray)))
+      .join(lambda.rows.filter { row => wordTotal.contains(row.index) }//filter the lambda matrix before join
+      .map(row => (row.index.toInt, row.vector.toArray)))
 
     //Now group by docID in order to recover documents
     val wordIdCountRow = wordIdDocIdCountRow
@@ -88,7 +91,7 @@ class DistributedOnlineLda(params: OnlineLdaParams) extends OnlineLda with Seria
           wIdCtRow.map(_._3.toArray)
         )
       })
-    //    D * T
+    //   D * T
     val gammaMT = BDM.vertcat(eStepResult.map(x => x.topicProportions ).collect(): _*)
     //collect RDDs and and compute perplexity in driver.  At some point this should be "sparkified" for speed.
 //    if (params.perplexity) {
@@ -176,8 +179,8 @@ class DistributedOnlineLda(params: OnlineLdaParams) extends OnlineLda with Seria
 
       iter += 1
     }
-    //                                              
-    val lambdaUpdatePreCompute: BDM[Double] = expELogThetaDoc.t * (wordCts / phiNorm)
+    //                                              V * 1                1 * T
+    val lambdaUpdatePreCompute: BDM[Double] = (wordCts / phiNorm) * expELogThetaDoc.t
 
     //Compute lambda row updates and zip with rowIds (note: rowIds = wordIds)
     //                          V * T                  V * T    
